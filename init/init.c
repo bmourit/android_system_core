@@ -57,6 +57,10 @@
 #include "util.h"
 #include "ueventd.h"
 #include "watchdogd.h"
+#ifdef ACT_HARDWARE
+#include <cutils/android_reboot.h>
+int do_hack(int argc , char **argv);
+#endif
 
 struct selabel_handle *sehandle;
 struct selabel_handle *sehandle_prop;
@@ -903,8 +907,70 @@ int audit_callback(void *data, security_class_t cls, char *buf, size_t len)
     return 0;
 }
 
-static int charging_mode_booting(void)
+#ifdef ACT_HARDWARE
+/*
+ bnmguy - *FIXME* This is a temp hack. We should impliment a proper fix.
+Checks were causing random data wipes when they weren't needed. For now, init value added in board rc file as workaround.
+
+*/
+/*
+wurui: For probatch, propertiy "persist.sys.shutok" will be set "null" when first startup by init process.
+    Then, it will be set "init" when user shutdown or reboot normally.
+    Next, when startup again, process init will check whether last shutdown is normally by checking "persist.sys.shutok" equals "init".
+        If false, last shutdown is unsafed, so wipe_date operation shall be requested and reboot to wipe data by recovery.
+*/
+static int property_shutdown_check_action(int nargs, char **args)
 {
+    int fd, cnt;
+    const char *ptr;
+    char battery_online[32];
+    
+    fd = open("/sbin/recovery", O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        return 0;
+    }
+
+    fd = open("/sys/class/power_supply/atc260x-battery/online", O_RDONLY);
+    if (fd >= 0) {
+        cnt = read(fd, battery_online, sizeof(battery_online));
+        close(fd);
+        if(cnt > 0 && battery_online[0] == '1') {
+            ptr = property_get("persist.sys.shutok");
+            if(ptr == NULL || strcmp(ptr, "init") != 0) {
+                property_set("persist.sys.shutok", "init");
+            }
+            return 0;
+        }
+    }
+
+    ptr = property_get("persist.sys.shutok");
+    if(ptr == NULL) {
+        property_set("persist.sys.shutok", "null");
+        sync();
+        ERROR("persist.sys.shutok set to null\n");
+    }
+    else if(strcmp(ptr, "init") != 0) {
+        ERROR("persist.sys.shutok is %s\n", ptr);
+
+        mkdir("/cache/recovery", 0770);
+        chown("/cache/recovery", AID_SYSTEM, AID_CACHE);
+        remove("/cache/recovery/command");
+        fd = open("/cache/recovery/command", O_CREAT | O_WRONLY, 0600);
+        if (fd >= 0) {
+            write(fd, "--wipe_data", 11);
+            close(fd);
+            chown("/cache/recovery/command", AID_SYSTEM, AID_SYSTEM);
+            ERROR("request recovery for --wipe_data\n");
+            android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
+        }
+    } else {
+        ERROR("persist.sys.shutok is init\n");
+    }
+    return 0;
+#endif
+
+static int charging_mode_booting(void) {
 #ifndef BOARD_CHARGING_MODE_BOOTING_LPM
     return 0;
 #else
@@ -1054,8 +1120,23 @@ int main(int argc, char **argv)
     }
 
     queue_builtin_action(property_service_init_action, "property_service_init");
+
+#ifdef ACT_HARDWARE
+    if (!is_charger) {
+        queue_builtin_action(property_shutdown_check_action, "property_shutdown_check");
+    }
+#endif
+
     queue_builtin_action(signal_init_action, "signal_init");
     queue_builtin_action(check_startup_action, "check_startup");
+
+#ifdef ACT_HARDWARE
+/*
+bnmguy FIXME: This is a hack implimented by Actions to work around missing entropy data on boot.
+We should do this the proper Android way
+*/
+   queue_builtin_action(do_hack, "do_hack");
+#endif
 
     /* Older bootloaders use non-standard charging modes. Check for
      * those now, after mounting the filesystems */

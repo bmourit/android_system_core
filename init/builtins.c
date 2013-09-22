@@ -78,9 +78,66 @@ static int write_file(const char *path, const char *value)
     }
 }
 
+#ifdef ACT_HARDWARE
+static int _open(const char *path)
+{
+    int fd;
+
+    fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0)
+        fd = open(path, O_WRONLY | O_NOFOLLOW);
+
+    return fd;
+}
+#endif
 
 static int _chown(const char *path, unsigned int uid, unsigned int gid)
 {
+#ifdef ACT_HARDWARE
+    int fd;
+    int ret;
+    fd = _open(path);
+    if (fd < 0) {
+        return -1;
+    }
+
+    ret = fchown(fd, uid, gid);
+    if (ret < 0) {
+        int errno_copy = errno;
+        close(fd);
+        errno = errno_copy;
+        return -1;
+    }
+
+    close(fd);
+
+    return 0;
+}
+
+static int _chmod(const char *path, mode_t mode)
+{
+    int fd;
+    int ret;
+
+    fd = _open(path);
+    if (fd < 0) {
+        return -1;
+    }
+
+    ret = fchmod(fd, mode);
+    if (ret < 0) {
+        int errno_copy = errno;
+        close(fd);
+        errno = errno_copy;
+        return -1;
+    }
+
+    close(fd);
+
+    return 0;
+}
+
+#else
     int ret;
 
     struct stat p_statbuf;
@@ -120,6 +177,7 @@ static int _chmod(const char *path, mode_t mode)
 
     return ret;
 }
+#endif
 
 static int insmod(const char *filename, char *options)
 {
@@ -244,26 +302,21 @@ int do_domainname(int nargs, char **args)
 }
 
 #define MAX_PARAMETERS 64
-int do_exec(int nargs, char **args)
-{
+int do_exec(int nargs, char **args) {
     pid_t pid;
     int status, i, j;
     char *par[MAX_PARAMETERS];
     char prop_val[PROP_VALUE_MAX];
     int len;
 
-    if (nargs > MAX_PARAMETERS)
-    {
+    if (nargs > MAX_PARAMETERS) {
         return -1;
     }
 
-    for(i=0, j=1; i<(nargs-1) ;i++,j++)
-    {
+    for(i=0, j=1; i<(nargs-1) ;i++,j++) {
         if ((args[j])
             &&
-            (!expand_props(prop_val, args[j], sizeof(prop_val))))
-
-        {
+            (!expand_props(prop_val, args[j], sizeof(prop_val)))) {
             len = strlen(args[j]);
             if (strlen(prop_val) <= len) {
                 /* Overwrite arg with expansion.
@@ -281,8 +334,7 @@ int do_exec(int nargs, char **args)
 
     par[i] = (char*)0;
     pid = fork();
-    if (!pid)
-    {
+    if (!pid) {
         char tmp[32];
         int fd, sz;
         get_property_workspace(&fd, &sz);
@@ -290,9 +342,7 @@ int do_exec(int nargs, char **args)
         setenv("ANDROID_PROPERTY_WORKSPACE", tmp, 1);
         execve(par[0], par, environ);
         exit(0);
-    }
-    else
-    {
+    } else {
         while(wait(&status)!=pid);
     }
 

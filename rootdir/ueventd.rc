@@ -80,6 +80,10 @@
 /dev/tun                  0660   system     vpn
 
 # CDMA radio interface MUX
+/dev/ttyUSB*							0666   radio			radio
+/dev/ttyUSB0							0666   radio			radio
+/dev/ttyUSB1							0666   radio			radio
+/dev/ttyUSB2							0666   radio			radio
 /dev/ts0710mux*           0640   radio      radio
 /dev/ppp                  0660   radio      vpn
 

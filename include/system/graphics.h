@@ -62,7 +62,10 @@ enum {
      * gralloc buffer of one of these formats must be supported for use with the
      * GL_OES_EGL_image_external OpenGL ES extension.
      */
-
+#ifdef ACT_HARDWARE
+    #define HAL_PIXEL_FORMAT_ACT_YU12         0x102  // YCbCr 4:2:0 Planar
+    #define HAL_PIXEL_FORMAT_ACT_NV12         0x101 // NV12
+#endif
     /*
      * Android YUV format:
      *

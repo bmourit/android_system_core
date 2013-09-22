@@ -23,6 +23,10 @@
 
 #include <linux/ion.h>
 
+#ifdef ACT_HARDWARE
+#include <linux/asoc_ion.h>
+#endif
+
 __BEGIN_DECLS
 
 int ion_open();
@@ -37,6 +41,12 @@ int ion_map(int fd, struct ion_handle *handle, size_t length, int prot,
             int flags, off_t offset, unsigned char **ptr, int *map_fd);
 int ion_share(int fd, struct ion_handle *handle, int *share_fd);
 int ion_import(int fd, int share_fd, struct ion_handle **handle);
+
+#ifdef ACT_HARDWARE
+int ion_phys(int fd, struct ion_handle *handle, unsigned long *phys);
+int ion_cache(int fd, struct ion_handle *handle, int cmd, void *vaddr, unsigned int offset,
+    unsigned int length);
+#endif
 
 __END_DECLS
 

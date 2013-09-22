@@ -65,7 +65,11 @@ struct {
     unsigned int uid;
     unsigned int gid;
 } property_perms[] = {
+#ifdef ACT_HARDWARE
+    { "net.rmnet0.",      AID_RADIO,    0 },
+#else
     { "net.rmnet",        AID_RADIO,    0 },
+#endif
     { "net.gprs.",        AID_RADIO,    0 },
     { "net.ppp",          AID_RADIO,    0 },
     { "net.qmi",          AID_RADIO,    0 },

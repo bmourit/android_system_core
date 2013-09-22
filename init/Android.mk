@@ -16,7 +16,8 @@ LOCAL_SRC_FILES:= \
 	init_parser.c \
 	ueventd.c \
 	ueventd_parser.c \
-	watchdogd.c
+	watchdogd.c	\
+	hack.c
 
 ifeq ($(strip $(INIT_BOOTCHART)),true)
 LOCAL_SRC_FILES += bootchart.c

@@ -19,7 +19,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -101,6 +103,194 @@ static void remount_ro(void)
     return;
 }
 
+#ifdef ACT_HARDWARE
+#define READ_BUF_SIZE 256
+
+int find_pid_by_names(char* pidName) {
+    DIR *dir;
+    struct dirent *next;
+    FILE *status;
+    char filename[READ_BUF_SIZE];
+    char buffer[READ_BUF_SIZE];
+    char name[READ_BUF_SIZE];
+    int i = 0;
+
+    dir = opendir("/proc");
+    if(!dir) {
+        //__android_log_print(ANDROID_LOG_ERROR, "libcutils", "Cannot open /proc");
+        return -1;
+    }
+
+    while((next = readdir(dir)) != NULL) {
+        /*   Must skip ".." since that is outside /proc*/ 
+        if(strcmp(next->d_name, "..") == 0) 
+            continue; 
+
+        /*   If it isn't a number, we don't want it*/ 
+        if(!isdigit(*next->d_name))
+            continue;
+
+        sprintf(filename, "/proc/%s/status", next->d_name);
+        if(!(status = fopen(filename, "r"))) 
+            continue;
+
+        /*Read first line in /proc/pid/status*/ 
+        if(fgets(buffer, READ_BUF_SIZE-1, status) == NULL) {
+            fclose(status);
+            continue;
+        }
+        fclose(status);
+
+        /*Buffer should contain a string like "Name:binary_name"*/
+        sscanf(buffer, "%*s %s", name);
+        if(strcmp(name, pidName) == 0) {
+            //__android_log_print(ANDROID_LOG_ERROR, "libcutils", "kill [%s]:[%d]\n", name, strtol(next->d_name, NULL, 0));
+            return strtol(next->d_name, NULL, 0);
+        }
+    }
+    return -1;
+} 
+static int kill_by_name(char *process_name) {
+    pid_t pid;
+
+    pid = find_pid_by_names(process_name);
+    if(pid >= 0)
+        kill(pid, SIGTERM);
+    return 0;
+}
+
+static int hibernate(void) {
+    int fd;
+
+    kill_by_name("ndroid.launcher");
+    sync();
+
+    fd = open("/misc/boot.prt", O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+    } else {
+        fd = open("/proc/sys/kernel/printk", O_WRONLY);
+        if (fd >= 0) {
+            write(fd, "1", 1);
+            close(fd);
+        }
+    }
+
+    /* Trigger the remount of the filesystems as read-only,
+     * which also marks them clean.
+     */
+    fd = open("/sys/power/state", O_WRONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    write(fd, "disk", 4);
+    close(fd);
+
+    return 0;
+}
+
+
+static char governor[32];
+static char *scaling_governor = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor";
+static unsigned int cnt;
+
+static int hibernate_perform(void) {
+    kill_by_name("mediaserver");
+
+    return 0;
+}
+
+static int hibernate_prepare(void) {
+    int fd;
+    cnt = 0;
+
+    fd = open(scaling_governor, O_RDONLY);
+    if (fd >= 0) {
+        cnt = read(fd, governor, sizeof(governor));
+        close(fd);
+
+        if(cnt > 0 && cnt <= sizeof(governor)) {
+            fd = open(scaling_governor, O_WRONLY);
+            if (fd >= 0) {
+                write(fd, "performance", 11);
+                close(fd);
+            }
+        }
+    }
+
+    fd = open("/sys/power/state", O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "prepare", 7);
+        close(fd);
+    }
+
+    return 0;
+}
+
+static int hibernate_screenOnOff(char *onoff) {
+    int fd;
+
+    if(strcmp(onoff, "on") == 0)
+        fd = open("/sys/power/wake_unlock", O_WRONLY);
+    else
+        fd = open("/sys/power/wake_lock", O_WRONLY);
+        
+    if (fd >= 0) {
+        write(fd, "hibernate", 9);
+        close(fd);
+    }
+
+    fd = open("/sys/power/state", O_WRONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    if(strcmp(onoff, "on") == 0)
+        write(fd, "on", 2);
+    else
+        write(fd, "mem", 3);
+    close(fd);
+    
+    return 0;
+}
+
+static int hibernate_resume() {
+    int fd;
+
+    if(cnt > 0 && cnt <= sizeof(governor)) {
+        fd = open(scaling_governor, O_WRONLY);
+        if (fd >= 0) {
+            write(fd, governor, cnt);
+            close(fd);
+        }
+    }
+    cnt = 0;
+
+    fd = open("/sys/power/state", O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "resume", 6);
+        close(fd);
+    }
+
+    fd = open("/misc/boot.prt", O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+    } else {
+        fd = open("/proc/sys/kernel/printk", O_WRONLY);
+        if (fd >= 0) {
+            write(fd, "5", 1);
+            close(fd);
+        }
+    }
+    return 0;
+}
+
+static int hibernate_kill(char *arg) {
+    int pid = strtol(arg, NULL, 0);
+    if(pid >= 0)
+        kill(pid, SIGTERM);
+    return 0;
+}
+#endif
 
 int android_reboot(int cmd, int flags, char *arg)
 {
@@ -113,6 +303,39 @@ int android_reboot(int cmd, int flags, char *arg)
             char cmd[PATH_MAX];
             sprintf(cmd, RECOVERY_PRE_COMMAND " %s", arg);
             system(cmd);
+        }
+    }
+#endif
+
+#ifdef ACT_HARDWARE
+    if(cmd == (int)ANDROID_RB_RESTART2) {
+        if(strcmp(arg, "perform") == 0) {
+            ret = hibernate_perform();
+            return ret;
+        }
+        else if(strcmp(arg, "prepare") == 0) {
+            ret = hibernate_prepare();
+            return ret;
+        }
+        else if(strcmp(arg, "shutdown") == 0) {
+            ret = hibernate();
+            return ret;
+        }
+        else if(strcmp(arg, "screenOn") == 0) {
+            ret = hibernate_screenOnOff("on");
+            return ret;
+        }
+        else if(strcmp(arg, "screenOff") == 0) {
+            ret = hibernate_screenOnOff("off");
+            return ret;
+        }
+        else if(strcmp(arg, "resume") == 0) {
+            ret = hibernate_resume();
+            return ret;
+        }
+        else if(strncmp(arg, "kill ", 5) == 0) {
+            ret = hibernate_kill(arg + 5);
+            return ret;
         }
     }
 #endif
