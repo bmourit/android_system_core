@@ -968,7 +968,7 @@ static int property_shutdown_check_action(int nargs, char **args)
         ERROR("persist.sys.shutok is init\n");
     }
     return 0;
-#endif
+#else
 
 static int charging_mode_booting(void) {
 #ifndef BOARD_CHARGING_MODE_BOOTING_LPM
@@ -985,6 +985,7 @@ static int charging_mode_booting(void) {
 
     close(f);
     return ('1' == cmb);
+#endif
 #endif
 }
 
