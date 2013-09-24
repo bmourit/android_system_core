@@ -28,8 +28,11 @@
 #include <sys/types.h>
 
 #include <linux/ion.h>
-#include <linux/asoc_ion.h>
 #include <ion/ion.h>
+
+#ifdef ACT_HARDWARE
+#include <linux/asoc_ion.h>
+#endif
 
 int ion_open()
 {

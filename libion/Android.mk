@@ -19,6 +19,6 @@ LOCAL_MODULE_TAGS := optional tests
 LOCAL_SHARED_LIBRARIES := liblog
 ifneq ($(TARGET_BOARD_PLATFORM),ATM702X)
 include $(BUILD_EXECUTABLE)
-
 endif
+
 endif

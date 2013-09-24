@@ -44,8 +44,7 @@ int ion_import(int fd, int share_fd, struct ion_handle **handle);
 
 #ifdef ACT_HARDWARE
 int ion_phys(int fd, struct ion_handle *handle, unsigned long *phys);
-int ion_cache(int fd, struct ion_handle *handle, int cmd, void *vaddr, unsigned int offset,
-    unsigned int length);
+int ion_cache(int fd, struct ion_handle *handle, int cmd, void *vaddr, unsigned int offset, unsigned int length);
 #endif
 
 __END_DECLS
