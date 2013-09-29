@@ -280,7 +280,7 @@ on post-fs-data
     #setprop vold.post_fs_data_done 1
 
 # Include extra init file
-    import /init.cm.rc
+    import /init.carbon.rc
 
 on boot
     # interactive governor
@@ -531,7 +531,6 @@ service servicemanager /system/bin/servicemanager
     onrestart restart media
     onrestart restart surfaceflinger
     onrestart restart drm
-    onrestart restart pfmnceserver
 
 service vold /system/bin/vold
     class core
@@ -558,10 +557,6 @@ service surfaceflinger /system/bin/surfaceflinger
     class main
     user system
     group graphics drmrpc
-    onrestart restart zygote
-service pfmnceserver /system/bin/pfmnceserver
-    class main
-    user root
     onrestart restart zygote
 
 service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
