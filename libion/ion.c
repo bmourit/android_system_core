@@ -30,10 +30,6 @@
 #include <linux/ion.h>
 #include <ion/ion.h>
 
-#ifdef ACT_HARDWARE
-#include <linux/asoc_ion.h>
-#endif
-
 int ion_open()
 {
         int fd = open("/dev/ion", O_RDWR);
@@ -164,43 +160,3 @@ int ion_sync_fd(int fd, int handle_fd)
     return ion_ioctl(fd, ION_IOC_SYNC, &data);
 #endif
 }
-
-#ifdef ACT_HARDWARE
-int ion_phys(int fd, struct ion_handle *handle, unsigned long *phys)
-{
-	      int ret; 
-        struct asoc_ion_phys_data phys_data = {
-                .handle = handle,
-        };
-
-        struct ion_custom_data data = {
-                .cmd = ASOC_ION_GET_PHY,
-                .arg = (unsigned long)&phys_data,
-        };
-        
-        ret = ion_ioctl(fd, ION_IOC_CUSTOM, &data);
-
-        if (ret < 0)
-            return ret;
-        *phys = phys_data.phys_addr;
-        return ret;
-}
-
-int ion_cache(int fd, struct ion_handle *handle, int cmd, void *vaddr, unsigned int offset, unsigned int length)
-{
-        int ret;
-        struct ion_flush_data data = {
-                .handle = handle,
-                .fd = fd,
-                .vaddr = vaddr,
-                .offset = offset,
-                .length = length,
-        };
-
-        ret = ion_ioctl(fd, cmd, &data);
-        if (ret < 0)
-                return ret;
-
-        return ret;
-}
-#endif

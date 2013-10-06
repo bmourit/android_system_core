@@ -45,10 +45,6 @@
 #include <suspend/autosuspend.h>
 #endif
 
-#ifdef ACT_HARDWARE
-#include <hardware_legacy/power.h>
-#endif
-
 #include "minui/minui.h"
 
 #ifndef max
@@ -67,10 +63,6 @@
 #define BATTERY_UNKNOWN_TIME    (2 * MSEC_PER_SEC)
 #define POWER_ON_KEY_TIME       (2 * MSEC_PER_SEC)
 #define UNPLUGGED_SHUTDOWN_TIME (10 * MSEC_PER_SEC)
-#ifdef ACT_HARDWARE
-#define DISCHARGE_TIME          (15 * MSEC_PER_SEC)
-#define LOW_POWER_VOLTAGE		3300000
-#endif
 
 #define BATTERY_FULL_THRESH     95
 
@@ -85,11 +77,6 @@
 #define LOG_NDEBUG 0
 #define LOG_TAG "charger"
 #include <cutils/log.h>
-#endif
-
-#ifdef ACT_HARDWARE
-// start time of discharge
-static int64_t discharge_start = 0;
 #endif
 
 #define SYS_POWER_STATE "/sys/power/state"
@@ -107,10 +94,6 @@ struct power_supply {
     bool online;
     bool valid;
     char cap_path[PATH_MAX];
-#ifdef ACT_HARDWARE
-    char status_path[PATH_MAX];
-    char vol_path[PATH_MAX];
-#endif
 };
 
 struct frame {
@@ -152,10 +135,6 @@ struct charger {
     gr_surface surf_unknown;
 
     struct power_supply *battery;
-#ifdef ACT_HARDWARE
-    struct power_supply *wall_supply;
-    struct power_supply *usb_supply;
-#endif
 };
 
 struct uevent {
@@ -210,22 +189,6 @@ static struct animation battery_animation = {
 static struct charger charger_state = {
     .batt_anim = &battery_animation,
 };
-#ifdef ACT_HARDWARE
-enum STATE {
-    PREPARE_DISPLAY,
-    CYCLE_DISPLAY,
-    PREPARE_SUSPEND,
-    WAIT_SUSPEND,
-};
-enum ONOFF_MODE {
-	ON,
-	MEM,
-};
-int state= PREPARE_DISPLAY;
-int onoff_mode;
-bool bat_full = false;
-int lock_flag = 0;
-#endif
 
 static int char_width;
 static int char_height;
@@ -340,7 +303,7 @@ static int read_file_int(const char *path, int *val)
 err:
     return -1;
 }
-#ifndef ACT_HARDWARE
+
 static int write_file(const char *path, char *buf, size_t sz)
 {
     int fd;
@@ -362,27 +325,6 @@ err:
         close(fd);
     return -1;
 }
-#else
-// restart device
-static void restart_device(bool setFlag)
-{
-    LOGI("&&&&&&&&&&&&&&&&&&&&  restart_device &&&&&&&&&&&&&&& --- %d", setFlag);
-    if(setFlag) {
-        LOGI("&&&&&&&&& set charge status before reboot &&&&&&&");
-        int fd = open("/sys/devices/platform/asoc_spi.1/spi_master/spi1/spi1.0/set_charger_status", O_RDWR);
-        write(fd, "0x1", strlen("0x1"));
-        char tmp[6] = {0};
-        lseek(fd, 0, SEEK_SET);
-        read(fd, tmp, sizeof(tmp));
-        LOGI("@@@@ %s @@@", tmp);
-        close(fd);
-    }
-    
-    system("echo 0 > /sys/class/backlight/act_pwm_backlight/brightness");
-    android_reboot(ANDROID_RB_RESTART, 0, 0);
-    usleep(100000);
-}
-#endif
 
 static int get_battery_capacity(struct charger *charger)
 {
@@ -399,21 +341,6 @@ static int get_battery_capacity(struct charger *charger)
 
     return batt_cap;
 }
-
-#ifdef ACT_HARDWARE
-static int get_battery_voltage(struct charger *charger)
-{
-    int ret;
-    int batt_vol;
-
-    if (!charger->battery)
-        return -1;
-
-    ret = read_file_int(charger->battery->vol_path, &batt_vol);
-    
-    return batt_vol;
-}
-#endif
 
 static struct power_supply *find_supply(struct charger *charger,
                                         const char *name)
@@ -443,12 +370,6 @@ static struct power_supply *add_supply(struct charger *charger,
     strlcpy(supply->type, type, sizeof(supply->type));
     snprintf(supply->cap_path, sizeof(supply->cap_path),
              "/sys/%s/capacity", path);
-#ifdef ACT_HARDWARE
-    snprintf(supply->status_path, sizeof(supply->status_path),
-             "/sys/%s/status", path);
-    snprintf(supply->vol_path, sizeof(supply->vol_path),
-             "/sys/%s/voltage_now", path);
-#endif
     supply->online = online;
     list_add_tail(&charger->supplies, &supply->list);
     charger->num_supplies++;
@@ -532,10 +453,6 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
     int i;
     bool was_online = false;
     bool battery = false;
-#ifdef ACT_HARDWARE
-    bool wall = false;
-    bool usb = false;
-#endif
 
     if (uevent->ps_type[0] == '\0') {
         char *path;
@@ -560,18 +477,8 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
             return;
 #endif
 
-#ifndef ACT_HARDWARE
     if (!strncmp(ps_type, "Battery", 7))
         battery = true;
-#else
-    if (!strncmp(ps_type, "Battery", 7)) {
-        battery = true;
-    } else if (!strncmp(ps_type, "Mains", 5)) {
-    	wall = true;
-    } else if (!strncmp(ps_type, "USB", 3)) {
-    	usb = true;
-    }
-#endif
 
     online = atoi(uevent->ps_online);
     supply = find_supply(charger, uevent->ps_name);
@@ -590,25 +497,13 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
                 return;
             }
             /* only pick up the first battery for now */
-        #ifndef ACT_HARDWARE
             if (battery && !charger->battery)
                     charger->battery = supply;
-        #else
-            if (battery && !charger->battery) {
-                charger->battery = supply;
-            } else if (wall && !charger->wall_supply) {
-                charger->wall_supply = supply;
-            } else if (usb && !charger->usb_supply) {
-                charger->usb_supply = supply;
-            }
-        #endif
-                
         } else {
             LOGE("supply '%s' already exists..\n", uevent->ps_name);
         }
     } else if (!strcmp(uevent->action, "remove")) {
         if (supply) {
-        #ifndef ACT_HARDWARE
             if (charger->battery == supply)
                 charger->battery = NULL;
             remove_supply(charger, supply);
@@ -618,23 +513,6 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
         if (!supply) {
             LOGE("power supply '%s' not found ('%s' %d)\n",
                  uevent->ps_name, ps_type, online);
-        #else
-            if (charger->battery == supply) {
-                charger->battery = NULL;
-            } else if (charger->wall_supply == supply) {
-                charger->wall_supply = NULL;
-            } else if (charger->usb_supply == supply) {
-                charger->usb_supply = NULL;
-            }
-            remove_supply(charger, supply);
-            supply = NULL;
-        }
-    } else if (!strcmp(uevent->action, "change")) {
-        if (!supply) {
-            LOGE("power supply '%s' not found ('%s' %d)\n",
-                 uevent->ps_name, ps_type, online);
-            return;
-        #endif
         }
     } else {
         return;
@@ -836,27 +714,6 @@ static void redraw_screen(struct charger *charger)
         draw_battery(charger);
     gr_flip();
 }
-#ifdef ACT_HARDWARE
-static bool power_supply_enough(struct charger *charger)
-{
-	bool is_power_enough = true;
-	int vol = 0;
-   	
-	if (charger->wall_supply->online) {
-   	    is_power_enough = true;
-    } else {
-   	    vol = get_battery_voltage(charger);
-        LOGI("voltage: %d\n", vol);
-        if (vol > LOW_POWER_VOLTAGE) {
-            is_power_enough = true;
-        } else {
-    	    is_power_enough = false;
-    	}
-    }
-    
-    return is_power_enough;
-}
-#endif
 
 static void kick_animation(struct animation *anim)
 {
@@ -878,9 +735,7 @@ static void update_screen_state(struct charger *charger, int64_t now)
     struct animation *batt_anim = charger->batt_anim;
     int cur_frame;
     int disp_time;
-#ifdef ACT_HARDWARE
-    LOGV("batt_anim->run:%d, now < charger->next_screen_transition:%d, batt_anim->cur_cycle:%d, batt_anim->cur_frame:%d, batt_anim->num_cycles:%d\n", batt_anim->run, now < charger->next_screen_transition, batt_anim->cur_cycle,batt_anim->cur_frame,  batt_anim->num_cycles );
-#endif
+
     if (!batt_anim->run || now < charger->next_screen_transition)
         return;
 
@@ -926,17 +781,8 @@ static void update_screen_state(struct charger *charger, int64_t now)
 
     /* unblank the screen  on first cycle */
     if (batt_anim->cur_cycle == 0)
-#ifdef ACT_HARDWARE
-        {
-        bool is_power_enough = true;
-   	is_power_enough = power_supply_enough(charger);
-   	if (is_power_enough) {
-            gr_fb_blank(false);
-       }
-    }
-#else
         gr_fb_blank(false);
-#endif
+
     /* draw the new frame (@ cur_frame) */
     redraw_screen(charger);
 
@@ -1031,32 +877,10 @@ static void process_key(struct charger *charger, int code, int64_t now)
 
     if (code == KEY_POWER) {
         if (key->down) {
-        #ifdef ACT_HARDWARE
-            LOGV("power key is press\n");
-           // if (onoff_mode == MEM) {
-            	state = PREPARE_DISPLAY;
-            	 if (!lock_flag) {
-    	    	        acquire_wake_lock(PARTIAL_WAKE_LOCK, "charger");
-    	    	        lock_flag = 1;
-    	    	 }
-          //  }
-        #endif
             int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
             if (now >= reboot_timeout) {
-        #ifndef ACT_HARDWARE
                 LOGI("[%lld] rebooting\n", now);
                 android_reboot(ANDROID_RB_RESTART, 0, 0);
-        #else
-            	bool is_power_enough = true;
-   	
-			   	is_power_enough = power_supply_enough(charger);
-			   	if (is_power_enough) {
-                   LOGI("[%lld] power key long press, rebooting\n", now);
-                    restart_device(true);
-                } else {
-                    set_next_key_check(charger, key, POWER_ON_KEY_TIME);
-                }
-        #endif
             } else {
                 /* if the key is pressed but timeout hasn't expired,
                  * make sure we wake up at the right-ish time to check
@@ -1065,15 +889,8 @@ static void process_key(struct charger *charger, int code, int64_t now)
             }
         } else {
             /* if the power key got released, force screen state cycle */
-        #ifdef ACT_HARDWARE
-            LOGV("power key is release\n");
-            if (key->pending) {
-            	reset_animation(charger->batt_anim);
-            	charger->next_screen_transition = -1;
-        #else
             if (key->pending) {
                 request_suspend(false);
-        #endif
                 kick_animation(charger->batt_anim);
             }
         }
@@ -1161,131 +978,17 @@ static int input_callback(int fd, short revents, void *data)
     return 0;
 }
 
-#ifdef ACT_HARDWARE
-static void check_battery_full(struct charger *charger)
-{
-    char status[64] = {0};
-
-    if(!charger->battery || !charger->battery->online) {
-        LOGI("battery not online");
-        restart_device(true);
-        return;
-    }
-
-    if(read_file(charger->battery->status_path, status, sizeof(status)) < 0) {
-        LOGI("read battery status error!");
-        return;
-    }
-    
-    int64_t curTime = curr_time_ms();
-
-//    LOGI("charge status:%s", status);
-    if(!memcmp(status, "Full", strlen("Full"))) {
-        LOGI("battery is full!\n");
-        //android_reboot(ANDROID_RB_POWEROFF, 0, 0);
-        //usleep(1000000); // wait shutdown
-        bat_full = true;
-    } else if(!memcmp(status, "Discharging", strlen("Discharging"))) {
-//        LOGI("discharging! cur:%lld, start:%lld\n", curTime, discharge_start);
-        if(discharge_start == 0) {
-            discharge_start = curTime;
-        } else if(curTime - discharge_start >= DISCHARGE_TIME) {
-            LOGI("discharge for a long time, shutdown");
-            android_reboot(ANDROID_RB_POWEROFF, 0, 0);
-            usleep(1000000); // wait shutdown
-        }
-        bat_full = false;
-    } else if(memcmp(status, "Charging", strlen("Charging"))) {
-        LOGI("not charge!\n");
-        bat_full = false;
-    } else {
-       bat_full = false;
-    }
-    
-    if(memcmp(status, "Discharging", strlen("Discharging"))) {
-        discharge_start = 0;
-    }
-}
-#endif
-
 static void event_loop(struct charger *charger)
 {
     int ret;
-#ifdef ACT_HARDWARE
-    int fd;
-#endif
 
     while (true) {
         int64_t now = curr_time_ms();
-    #ifdef ACT_HARDWARE
-        check_battery_full(charger);
-    #endif
+
         LOGV("[%lld] event_loop()\n", now);
         handle_input_state(charger, now);
         handle_power_supply_state(charger, now);
-    #ifdef ACT_HARDWARE
-    	if (bat_full) {
-           switch (state) {
-    	    case PREPARE_DISPLAY:
-    	    	      if (!lock_flag) {
-    	    	        acquire_wake_lock(PARTIAL_WAKE_LOCK, "charger");
-    	    	        lock_flag = 1;
-    	    	     }
-    	    	     LOGV("#### state0 ####\n");
-    	            fd = open("/sys/power/state", O_RDWR);
-	            write(fd, "on", strlen("on"));
-	            close(fd);
-	            LOGV("#### on ####\n");
-	            onoff_mode = ON;
-	                 
-	             /* do screen update last in case any of the above want to start
-	                 * screen transitions (animations, etc)
-	             */
-	             //reset_animation(charger->batt_anim);
-	             //kick_animation(charger->batt_anim);  
-	             //gr_fb_blank(false);
 
-	             state = CYCLE_DISPLAY;
-	               	    
-    		break;
-    		
-    	    case CYCLE_DISPLAY:
-    	    	LOGV("#### state1 ####\n");
-	        if (charger->batt_anim->run ==  false)  {
-	        	state = PREPARE_SUSPEND;
-	        }
-    		break;
-    		
-    	    case PREPARE_SUSPEND:
-    	    	    LOGV("#### state2 ####\n");
-    	    	    //gr_fb_blank(true);                   
-                   fd = open("/sys/power/state", O_RDWR);
-                   write(fd, "mem", strlen("mem"));
-                   lseek(fd, 0, SEEK_SET);
-                   char tmp[4] = {0};
-                   read(fd, tmp, strlen("mem"));
-                   close(fd);
-                   LOGV("@@@@ %s @@@", tmp);
-                   onoff_mode = MEM;
-                   memset(tmp, 0, sizeof(tmp));
-	            
-	            state = WAIT_SUSPEND;
-    		//break;
-    		
-    	    case WAIT_SUSPEND:
-    		LOGV("#### state3 ####\n");
-    		if (lock_flag) {
-    			 release_wake_lock("charger");
-    		        lock_flag = 0;
-    		}
-    		
-    		break;
-    		
-    	    default:
-    	    	break;
-            }
-        }
-    #endif
         /* do screen update last in case any of the above want to start
          * screen transitions (animations, etc)
          */

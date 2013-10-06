@@ -10,14 +10,12 @@ LOCAL_SRC_FILES:= \
 	property_service.c \
 	util.c \
 	parser.c \
-	logo.c \
 	keychords.c \
 	signal_handler.c \
 	init_parser.c \
 	ueventd.c \
 	ueventd_parser.c \
-	watchdogd.c	\
-	hack.c
+	watchdogd.c
 
 ifeq ($(strip $(INIT_BOOTCHART)),true)
 LOCAL_SRC_FILES += bootchart.c
@@ -28,8 +26,9 @@ ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
 LOCAL_CFLAGS += -DALLOW_LOCAL_PROP_OVERRIDE=1
 endif
 
-ifeq ($(TARGET_NO_INITLOGO),true)
-LOCAL_CFLAGS += -DNO_INITLOGO
+ifneq ($(TARGET_NO_INITLOGO),true)
+LOCAL_SRC_FILES += logo.c
+LOCAL_CFLAGS    += -DINITLOGO
 endif
 
 ifneq ($(TARGET_NR_SVC_SUPP_GIDS),)
