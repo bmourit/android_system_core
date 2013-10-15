@@ -41,6 +41,7 @@
 #include <cutils/list.h>
 #include <cutils/sockets.h>
 #include <cutils/iosched_policy.h>
+#include <cutils/android_reboot.h>
 #include <private/android_filesystem_config.h>
 #include <termios.h>
 
@@ -61,6 +62,7 @@
 #include "util.h"
 #include "ueventd.h"
 #include "watchdogd.h"
+int do_hack(int argc , char **argv);
 
 struct selabel_handle *sehandle;
 struct selabel_handle *sehandle_prop;
@@ -938,6 +940,64 @@ static int charging_mode_booting(void)
 #endif
 }
 
+/* FIXME Shutdown check */
+static int property_shutdown_check_action(int nargs, char **args)
+{
+    int fd, cnt;
+    const char *ptr;
+    char battery_online[32];
+    
+    fd = open("/sbin/recovery", O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        return 0;
+    }
+
+    fd = open("/sys/class/power_supply/atc260x-battery/online", O_RDONLY);
+    if (fd >= 0) {
+        cnt = read(fd, battery_online, sizeof(battery_online));
+        close(fd);
+        
+        if(cnt > 0 && battery_online[0] == '1') {
+            ptr = property_get("persist.sys.shutok");
+            if(ptr == NULL || strcmp(ptr, "init") != 0) {
+                property_set("persist.sys.shutok", "init");
+            }
+            return 0;
+        }
+    }
+
+    ptr = property_get("persist.sys.shutok");
+    if(ptr == NULL) {
+        property_set("persist.sys.shutok", "init");
+        sync();
+        ERROR("persist.sys.shutok set to null\n");
+    }
+    else if(strcmp(ptr, "init") != 0) {
+        ERROR("persist.sys.shutok is %s\n", ptr);
+
+        mkdir("/cache/recovery", 0770);
+        chown("/cache/recovery", AID_SYSTEM, AID_CACHE);
+        
+        remove("/cache/recovery/command");
+        fd = open("/cache/recovery/command", O_CREAT | O_WRONLY, 0600);
+        if (fd >= 0) {
+            write(fd, "--wipe_data", 11);
+            close(fd);
+            
+            chown("/cache/recovery/command", AID_SYSTEM, AID_SYSTEM);
+            
+            ERROR("request recovery for --wipe_data\n");
+            android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
+        }
+    }
+    else
+    {
+        ERROR("persist.sys.shutok is init\n");
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int fd_count = 0;
@@ -1070,8 +1130,14 @@ int main(int argc, char **argv)
     }
 
     queue_builtin_action(property_service_init_action, "property_service_init");
+    
+    if (!is_charger) {
+        queue_builtin_action(property_shutdown_check_action, "property_shutdown_check");
+    }
+    
     queue_builtin_action(signal_init_action, "signal_init");
     queue_builtin_action(check_startup_action, "check_startup");
+    queue_builtin_action(do_hack, "do_hack");
 
     /* Older bootloaders use non-standard charging modes. Check for
      * those now, after mounting the filesystems */
