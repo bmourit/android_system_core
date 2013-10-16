@@ -138,10 +138,9 @@ void do_hack_update_system_prop(void){
 	ERROR("value=%s", value);
 	property_set("system.ram.total", value);
 
-} 
+}
 
 int do_hack(int argc , char **argv) {
-	
 	int fd;
 	const char *dohack;
 	char *entropy="/data/system/entropy.dat";
