@@ -571,6 +571,67 @@ int ifc_add_host_route(const char *name, in_addr_t dst)
     return ifc_act_on_ipv4_route(SIOCADDRT, name, in_dst, 32, in_gw);
 }
 
+int ifc_verify(const char *ifname)
+{
+    int numifrs;
+    struct ifconf ifc;
+    struct ifreq ifr[30];
+    int i;
+    struct timeval tv;
+    int retry=4;
+
+    while (retry-- >0) {
+        numifrs = 30;
+        ifc.ifc_len = sizeof(struct ifreq) * numifrs;
+        ifc.ifc_buf = (char *) ifr;
+
+        if (ioctl(ifc_ctl_sock, SIOCGIFCONF, &ifc) < 0) {
+            return -1;
+        }
+
+        numifrs = ifc.ifc_len / sizeof(struct ifreq);
+
+        for (i=0; i<numifrs; ++i) {
+            if (strncmp(ifname, ifr[i].ifr_name, 16)==0) {
+               return 0;
+            }
+        }
+
+        tv.tv_sec = 0;
+        tv.tv_usec = 500 *1000;
+        select(0, 0, 0, 0, &tv);
+    }
+ 
+    return -1;
+}
+
+
+static int ifc_running_flag(const char *name)
+{
+    struct ifreq ifr;
+    int flags;
+    int result;
+
+    ifc_init_ifr(name, &ifr);
+
+    if(ioctl(ifc_ctl_sock, SIOCGIFFLAGS, &ifr) < 0) return -1;
+    flags = IFF_UP|IFF_RUNNING;
+    if((ifr.ifr_flags & flags)== flags)  {
+        return 0;
+    }
+    return -1;
+}
+
+int ifc_is_running(const char *ifname)
+{
+    int result;
+
+    ifc_init();
+    result = ifc_running_flag(ifname);
+    ifc_close();
+    return result;
+}
+
 int ifc_enable(const char *ifname)
 {
     int result;
@@ -970,38 +1031,4 @@ int ifc_add_route(const char *ifname, const char *dst, int prefix_length, const 
 int ifc_remove_route(const char *ifname, const char*dst, int prefix_length, const char *gw)
 {
     return ifc_act_on_route(SIOCDELRT, ifname, dst, prefix_length, gw);
-}
-
-int ifc_get_mtu(const char *name, int *mtuSz)
-{
-    struct ifreq ifr;
-    ifc_init_ifr(name, &ifr);
-
-    if (mtuSz != NULL) {
-        if(ioctl(ifc_ctl_sock, SIOCGIFMTU, &ifr) < 0) {
-            *mtuSz = 0;
-            return -2;
-        } else {
-            *mtuSz = ifr.ifr_mtu;
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-// Required for Broadcom RILD
-int ifc_set_mtu(const char *name, int mtuSz)
-{
-    struct ifreq ifr;
-    int ret;
-    ifc_init_ifr(name, &ifr);
-    ifr.ifr_mtu = mtuSz;
-
-    ret = ioctl(ifc_ctl_sock, SIOCSIFMTU, &ifr);
-    if (ret < 0) {
-        printerr("ifc_set_mtu: SIOCSIFMTU failed: %d\n", ret);
-    }
-
-    return ret;
 }
