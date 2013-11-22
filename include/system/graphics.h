@@ -54,6 +54,8 @@ enum {
     HAL_PIXEL_FORMAT_RGB_888            = 3,
     HAL_PIXEL_FORMAT_RGB_565            = 4,
     HAL_PIXEL_FORMAT_BGRA_8888          = 5,
+    HAL_PIXEL_FORMAT_RGBA_5551          = 6,
+    HAL_PIXEL_FORMAT_RGBA_4444          = 7,
 
     /*
      * sRGB color pixel formats:
@@ -87,6 +89,9 @@ enum {
      * gralloc buffer of one of these formats must be supported for use with the
      * GL_OES_EGL_image_external OpenGL ES extension.
      */
+
+#define HAL_PIXEL_FORMAT_ACT_NV12	0x101  // NV12
+#define HAL_PIXEL_FORMAT_ACT_YU12	0x102  // YCbCr 4:2:0 Planar
 
     /*
      * Android YUV format:

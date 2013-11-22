@@ -45,7 +45,17 @@
 #include <suspend/autosuspend.h>
 #endif
 
+#ifdef ACT_HARDWARE
+#include <hardware_legacy/power.h>
+#endif
+
 #include "minui/minui.h"
+
+#ifndef ACT_HARDWARE
+#include <pthread.h>
+#include <linux/android_alarm.h>
+#include <linux/rtc.h>
+#endif
 
 #ifndef max
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -62,16 +72,45 @@
 
 #define BATTERY_UNKNOWN_TIME    (2 * MSEC_PER_SEC)
 #define POWER_ON_KEY_TIME       (2 * MSEC_PER_SEC)
+
+#ifdef ACT_HARDWARE
 #define UNPLUGGED_SHUTDOWN_TIME (10 * MSEC_PER_SEC)
+#define DISCHARGE_TIME          (15 * MSEC_PER_SEC)
+#else
+#define UNPLUGGED_SHUTDOWN_TIME (2 * MSEC_PER_SEC)
+#endif
 
 #define BATTERY_FULL_THRESH     95
+
+#ifdef ACT_HARDWARE
+#define BACKLIGHT_TOGGLE_PATH "/sys/class/backlight/act_pwm_backlight/brightness"
+#else
+#define BACKLIGHT_TOGGLE_PATH "/sys/class/leds/lcd-backlight/brightness"
+#endif
 
 #define LAST_KMSG_PATH          "/proc/last_kmsg"
 #define LAST_KMSG_MAX_SZ        (32 * 1024)
 
+#ifdef ACT_HARDWARE
+#define LOW_POWER_VOLTAGE		3300000
+#endif
+
+#if 1
 #define LOGE(x...) do { KLOG_ERROR("charger", x); } while (0)
 #define LOGI(x...) do { KLOG_INFO("charger", x); } while (0)
 #define LOGV(x...) do { KLOG_DEBUG("charger", x); } while (0)
+#else
+#define LOG_NDEBUG 0
+#define LOG_TAG "charger"
+#include <cutils/log.h>
+#endif
+
+#define SYS_POWER_STATE "/sys/power/state"
+
+#ifdef ACT_HARDWARE
+// start time of discharge
+static int64_t discharge_start = 0;
+#endif
 
 struct key_state {
     bool pending;
@@ -86,6 +125,10 @@ struct power_supply {
     bool online;
     bool valid;
     char cap_path[PATH_MAX];
+#ifdef ACT_HARDWARE
+    char status_path[PATH_MAX];
+    char vol_path[PATH_MAX];
+#endif
 };
 
 struct frame {
@@ -127,6 +170,10 @@ struct charger {
     gr_surface surf_unknown;
 
     struct power_supply *battery;
+#ifdef ACT_HARDWARE
+    struct power_supply *wall_supply;
+    struct power_supply *usb_supply;
+#endif
 };
 
 struct uevent {
@@ -182,9 +229,56 @@ static struct charger charger_state = {
     .batt_anim = &battery_animation,
 };
 
+#ifdef ACT_HARDWARE
+enum STATE {
+    PREPARE_DISPLAY,
+    CYCLE_DISPLAY,
+    PREPARE_SUSPEND,
+    WAIT_SUSPEND,
+};
+enum ONOFF_MODE {
+	ON,
+	MEM,
+};
+int state= PREPARE_DISPLAY;
+int onoff_mode;
+bool bat_full = false;
+int lock_flag = 0;
+#endif
+
 static int char_width;
 static int char_height;
 
+/*On certain targets the FBIOBLANK ioctl does not turn off the
+ * backlight. In those cases we need to manually toggle it on/off
+ */
+static int set_backlight(int toggle)
+{
+        int fd;
+        char buffer[10];
+
+        memset(buffer, '\0', sizeof(buffer));
+        fd = open(BACKLIGHT_TOGGLE_PATH, O_RDWR);
+        if (fd < 0) {
+                LOGE("Could not open backlight node : %s", strerror(errno));
+                goto cleanup;
+        }
+        if (toggle) {
+                LOGI("Enabling backlight");
+                snprintf(buffer, sizeof(int), "%d\n", 100);
+        } else {
+                LOGI("Disabling backlight");
+                snprintf(buffer, sizeof(int), "%d\n", 0);
+        }
+        if (write(fd, buffer,strlen(buffer)) < 0) {
+                LOGE("Could not write to backlight node : %s", strerror(errno));
+                goto cleanup;
+        }
+cleanup:
+        if (fd >= 0)
+                close(fd);
+        return 0;
+}
 /* current time in milliseconds */
 static int64_t curr_time_ms(void)
 {
@@ -296,6 +390,50 @@ err:
     return -1;
 }
 
+#ifdef ACT_HARDWARE
+// restart device
+static void restart_device(bool setFlag)
+{
+    LOGI("&&&&&&&&&&&&&&&&&&&&  restart_device &&&&&&&&&&&&&&& --- %d", setFlag);
+    if (setFlag) {
+        LOGI("&&&&&&&&& set charge status before reboot &&&&&&&");
+        int fd = open("/sys/devices/platform/asoc_spi.1/spi_master/spi1/spi1.0/set_charger_status", O_RDWR);
+        write(fd, "0x1", strlen("0x1"));
+        char tmp[6] = {0};
+        lseek(fd, 0, SEEK_SET);
+        read(fd, tmp, sizeof(tmp));
+        LOGI("@@@@ %s @@@", tmp);
+        close(fd);
+    }
+    
+    system("echo 0 > /sys/class/backlight/act_pwm_backlight/brightness");
+    android_reboot(ANDROID_RB_RESTART, 0, 0);
+    usleep(100000);
+}
+#endif
+
+static int write_file(const char *path, char *buf, size_t sz)
+{
+    int fd;
+    size_t cnt;
+
+    fd = open(path, O_WRONLY, 0);
+    if (fd < 0)
+        goto err;
+
+    cnt = write(fd, buf, sz);
+    if (cnt <= 0)
+        goto err;
+
+    close(fd);
+    return cnt;
+
+err:
+    if (fd >= 0)
+        close(fd);
+    return -1;
+}
+
 static int get_battery_capacity(struct charger *charger)
 {
     int ret;
@@ -311,6 +449,17 @@ static int get_battery_capacity(struct charger *charger)
 
     return batt_cap;
 }
+
+#ifdef ACT_HARDWARE
+static int get_battery_voltage(struct charger *charger) {
+    int ret;
+    int batt_vol;
+    if (!charger->battery)
+        return -1;
+    ret = read_file_int(charger->battery->vol_path, &batt_vol);
+    return batt_vol;
+}
+#endif
 
 static struct power_supply *find_supply(struct charger *charger,
                                         const char *name)
@@ -340,6 +489,12 @@ static struct power_supply *add_supply(struct charger *charger,
     strlcpy(supply->type, type, sizeof(supply->type));
     snprintf(supply->cap_path, sizeof(supply->cap_path),
              "/sys/%s/capacity", path);
+#ifdef ACT_HARDWARE
+    snprintf(supply->status_path, sizeof(supply->status_path),
+             "/sys/%s/status", path);
+    snprintf(supply->vol_path, sizeof(supply->vol_path),
+             "/sys/%s/voltage_now", path);
+#endif
     supply->online = online;
     list_add_tail(&charger->supplies, &supply->list);
     charger->num_supplies++;
@@ -422,7 +577,13 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
     struct power_supply *supply = NULL;
     int i;
     bool was_online = false;
+#ifdef ACT_HARDWARE
+    bool battery_exist = false;
+    bool wall_exist = false;
+    bool usb_exist = false;
+#else
     bool battery = false;
+#endif
 
     if (uevent->ps_type[0] == '\0') {
         char *path;
@@ -441,8 +602,24 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
         strlcpy(ps_type, uevent->ps_type, sizeof(ps_type));
     }
 
+#ifdef BATTERY_DEVICE_NAME
+        // We only want to look at one device
+        if (strcmp(BATTERY_DEVICE_NAME, uevent->ps_name) != 0)
+            return;
+#endif
+
+#ifdef ACT_HARDWARE
+    if (!strncmp(ps_type, "Battery", 7)) {
+        battery_exist = true;
+    } else if (!strncmp(ps_type, "Mains", 5)) {
+    	wall_exist = true;
+    } else if (!strncmp(ps_type, "USB", 3)) {
+    	usb_exist = true;
+    }
+#else
     if (!strncmp(ps_type, "Battery", 7))
         battery = true;
+#endif
 
     online = atoi(uevent->ps_online);
     supply = find_supply(charger, uevent->ps_name);
@@ -461,15 +638,35 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
                 return;
             }
             /* only pick up the first battery for now */
-            if (battery && !charger->battery)
+#ifdef ACT_HARDWARE
+            if (battery_exist && !charger->battery) {
                 charger->battery = supply;
+            } else if (wall_exist && !charger->wall_supply) {
+                charger->wall_supply = supply;
+            } else if (usb_exist && !charger->usb_supply) {
+                charger->usb_supply = supply;
+            }
+#else
+            if (battery && !charger->battery)
+                    charger->battery = supply;
+#endif
         } else {
             LOGE("supply '%s' already exists..\n", uevent->ps_name);
         }
     } else if (!strcmp(uevent->action, "remove")) {
         if (supply) {
+#ifdef ACT_HARDWARE
+            if (charger->battery == supply) {
+                charger->battery = NULL;
+            } else if (charger->wall_supply == supply) {
+                charger->wall_supply = NULL;
+            } else if (charger->usb_supply == supply) {
+                charger->usb_supply = NULL;
+            }
+#else
             if (charger->battery == supply)
                 charger->battery = NULL;
+#endif
             remove_supply(charger, supply);
             supply = NULL;
         }
@@ -477,7 +674,9 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
         if (!supply) {
             LOGE("power supply '%s' not found ('%s' %d)\n",
                  uevent->ps_name, ps_type, online);
+#ifdef ACT_HARDWARE
             return;
+#endif
         }
     } else {
         return;
@@ -485,15 +684,27 @@ static void process_ps_uevent(struct charger *charger, struct uevent *uevent)
 
     /* allow battery to be managed in the supply list but make it not
      * contribute to online power supplies. */
-    if (!battery) {
+
+#ifndef BATTERY_DEVICE_NAME
+    #ifdef ACT_HARDWARE
+        if (!battery_exist) {
+    #else
+        if (!battery) {
+    #endif
+#endif
         if (was_online && !online)
             charger->num_supplies_online--;
         else if (supply && !was_online && online)
             charger->num_supplies_online++;
+#ifndef BATTERY_DEVICE_NAME
     }
-
+#endif
     LOGI("power supply %s (%s) %s (action=%s num_online=%d num_supplies=%d)\n",
+#ifdef ACT_HARDWARE
+         uevent->ps_name, ps_type, battery_exist ? "" : online ? "online" : "offline",
+#else
          uevent->ps_name, ps_type, battery ? "" : online ? "online" : "offline",
+#endif
          uevent->action, charger->num_supplies_online, charger->num_supplies);
 }
 
@@ -620,6 +831,20 @@ static void android_green(void)
     gr_color(0xa4, 0xc6, 0x39, 255);
 }
 
+static void draw_capacity(struct charger *charger)
+{
+    char cap_str[64];
+    int x, y;
+    int str_len_px;
+
+    snprintf(cap_str, sizeof(cap_str), "%d%%", charger->batt_anim->capacity);
+    str_len_px = gr_measure(cap_str);
+    x = (gr_fb_width() - str_len_px) / 2;
+    y = (gr_fb_height() + char_height) / 2;
+    android_green();
+    gr_text(x, y, cap_str, 0);
+}
+
 /* returns the last y-offset of where the surface ends */
 static int draw_surface_centered(struct charger *charger, gr_surface surface)
 {
@@ -672,13 +897,37 @@ static void redraw_screen(struct charger *charger)
     /* try to display *something* */
     if (batt_anim->capacity < 0 || batt_anim->num_frames == 0)
         draw_unknown(charger);
-    else
+    else {
         draw_battery(charger);
+        draw_capacity(charger);
+    }
     gr_flip();
 }
 
+#ifdef ACT_HARDWARE
+static bool power_supply_enough(struct charger *charger) {
+    bool is_power_enough = true;
+    int vol = 0;
+    if (charger->wall_supply->online) {
+       is_power_enough = true;
+    } else {
+   	vol = get_battery_voltage(charger);
+        LOGI("voltage: %d\n", vol);
+        if (vol > LOW_POWER_VOLTAGE) {
+            is_power_enough = true;
+        } else {
+    	    is_power_enough = false;
+    	}
+    }
+    return is_power_enough;
+}
+#endif
+
 static void kick_animation(struct animation *anim)
 {
+#ifdef ALLOW_SUSPEND_IN_CHARGER
+    write_file(SYS_POWER_STATE, "on", strlen("on"));
+#endif
     anim->run = true;
 }
 
@@ -703,6 +952,14 @@ static void update_screen_state(struct charger *charger, int64_t now)
         reset_animation(batt_anim);
         charger->next_screen_transition = -1;
         gr_fb_blank(true);
+#ifndef ACT_HARDWARE
+        set_backlight(false);
+#endif
+
+#ifdef ALLOW_SUSPEND_IN_CHARGER
+        write_file(SYS_POWER_STATE, "mem", strlen("mem"));
+#endif
+
         LOGV("[%lld] animation done\n", now);
         if (charger->num_supplies_online > 0)
             request_suspend(true);
@@ -736,8 +993,18 @@ static void update_screen_state(struct charger *charger, int64_t now)
     }
 
     /* unblank the screen  on first cycle */
-    if (batt_anim->cur_cycle == 0)
+    if (batt_anim->cur_cycle == 0) {
+#ifdef ACT_HARDWARE
+        bool is_power_enough = true;
+   	is_power_enough = power_supply_enough(charger);
+   	if (is_power_enough) {
+   	    gr_fb_blank(false);
+       }
+#else
         gr_fb_blank(false);
+        set_backlight(true);
+#endif
+    }
 
     /* draw the new frame (@ cur_frame) */
     redraw_screen(charger);
@@ -828,15 +1095,34 @@ static void set_next_key_check(struct charger *charger,
 
 static void process_key(struct charger *charger, int code, int64_t now)
 {
+    struct animation *batt_anim = charger->batt_anim;
     struct key_state *key = &charger->keys[code];
     int64_t next_key_check;
 
     if (code == KEY_POWER) {
         if (key->down) {
+#ifdef ACT_HARDWARE
+            LOGV("power key is press\n");
+            state = PREPARE_DISPLAY;
+            if (!lock_flag) {
+    	        acquire_wake_lock(PARTIAL_WAKE_LOCK, "charger");
+    	    	lock_flag = 1;
+    	    }
             int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
             if (now >= reboot_timeout) {
-                LOGI("[%lld] rebooting\n", now);
+            	bool is_power_enough = true;
+	   	is_power_enough = power_supply_enough(charger);
+	   	if (is_power_enough) {
+                   LOGI("[%lld] power key long press, rebooting\n", now);
+                   restart_device(true);
+                } else {
+                    set_next_key_check(charger, key, POWER_ON_KEY_TIME);
+                }
+#else
+            int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
+            if (now >= reboot_timeout) {
                 android_reboot(ANDROID_RB_RESTART, 0, 0);
+#endif
             } else {
                 /* if the key is pressed but timeout hasn't expired,
                  * make sure we wake up at the right-ish time to check
@@ -846,9 +1132,25 @@ static void process_key(struct charger *charger, int code, int64_t now)
         } else {
             /* if the power key got released, force screen state cycle */
             if (key->pending) {
-                request_suspend(false);
-                kick_animation(charger->batt_anim);
+                if (!batt_anim->run) {
+                    request_suspend(false);
+                    kick_animation(charger->batt_anim);
+                } else {
+                    reset_animation(batt_anim);
+                    charger->next_screen_transition = -1;
+#ifndef ACT_HARDWARE
+                    gr_fb_blank(true);
+                    set_backlight(false);
+#endif
+                    if (charger->num_supplies_online > 0)
+                        request_suspend(true);
+                }
             }
+        }
+    } else {
+        if (key->pending) {
+            request_suspend(false);
+            kick_animation(charger->batt_anim);
         }
     }
 
@@ -858,6 +1160,8 @@ static void process_key(struct charger *charger, int code, int64_t now)
 static void handle_input_state(struct charger *charger, int64_t now)
 {
     process_key(charger, KEY_POWER, now);
+    process_key(charger, KEY_HOME, now);
+    process_key(charger, KEY_HOMEPAGE, now);
 
     if (charger->next_key_check != -1 && now > charger->next_key_check)
         charger->next_key_check = -1;
@@ -908,8 +1212,12 @@ static void wait_next_event(struct charger *charger, int64_t now)
     if (next_event != -1 && next_event != INT64_MAX)
         timeout = max(0, next_event - now);
     else
+#ifdef ACT_HARDWARE
+        timeout = 3*MSEC_PER_SEC;
+#else
         timeout = -1;
     LOGV("[%lld] blocking (%lld)\n", now, timeout);
+#endif
     ret = ev_wait((int)timeout);
     if (!ret)
         ev_dispatch();
@@ -928,6 +1236,111 @@ static int input_callback(int fd, short revents, void *data)
     return 0;
 }
 
+#ifdef ACT_HARDWARE
+static void check_battery_full(struct charger *charger) {
+    char status[64] = {0};
+    if(!charger->battery || !charger->battery->online) {
+        LOGI("battery not online");
+        restart_device(true);
+        return;
+    }
+    if(read_file(charger->battery->status_path, status, sizeof(status)) < 0) {
+        LOGI("read battery status error!");
+        return;
+    }
+    int64_t curTime = curr_time_ms();
+    if(!memcmp(status, "Full", strlen("Full"))) {
+        LOGI("battery is full!\n");
+        bat_full = true;
+    } else if(!memcmp(status, "Discharging", strlen("Discharging"))) {
+        if (discharge_start == 0) {
+            discharge_start = curTime;
+        } else if (curTime - discharge_start >= DISCHARGE_TIME) {
+            LOGI("discharge for a long time, shutdown");
+            android_reboot(ANDROID_RB_POWEROFF, 0, 0);
+            usleep(1000000); // wait for shutdown
+        }
+        bat_full = false;
+    } else if(memcmp(status, "Charging", strlen("Charging"))) {
+        LOGI("not charge!\n");
+        bat_full = false;
+    } else {
+       bat_full = false;
+    }
+    if(memcmp(status, "Discharging", strlen("Discharging"))) {
+        discharge_start = 0;
+    }
+}
+
+static void event_loop(struct charger *charger) {
+    int ret;
+    int fd;
+    while (true) {
+        int64_t now = curr_time_ms();
+        check_battery_full(charger);
+        LOGV("[%lld] event_loop()\n", now);
+        handle_input_state(charger, now);
+        handle_power_supply_state(charger, now);
+    	if (bat_full) {
+           switch (state) {
+    	   case PREPARE_DISPLAY:
+    	       if (!lock_flag) {
+    	           acquire_wake_lock(PARTIAL_WAKE_LOCK, "charger");
+    	           lock_flag = 1;
+    	       }
+    	       LOGV("#### state0 ####\n");
+    	       fd = open("/sys/power/state", O_RDWR);
+	       write(fd, "on", strlen("on"));
+	       close(fd);
+	       LOGV("#### on ####\n");
+	       onoff_mode = ON;
+
+	      /* do screen update last in case any of the above want to start
+	       * screen transitions (animations, etc)
+	       */
+	        state = CYCLE_DISPLAY;
+    		break;
+
+    	   case CYCLE_DISPLAY:
+    	   	LOGV("#### state1 ####\n");
+	       if (charger->batt_anim->run ==  false) {
+	           state = PREPARE_SUSPEND;
+	       }
+    	   break;
+
+    	   case PREPARE_SUSPEND:
+    	       LOGV("#### state2 ####\n");
+               fd = open("/sys/power/state", O_RDWR);
+               write(fd, "mem", strlen("mem"));
+               lseek(fd, 0, SEEK_SET);
+               char tmp[4] = {0};
+               read(fd, tmp, strlen("mem"));
+               close(fd);
+               LOGV("@@@@ %s @@@", tmp);
+               onoff_mode = MEM;
+               memset(tmp, 0, sizeof(tmp));
+	       state = WAIT_SUSPEND;
+
+    	   case WAIT_SUSPEND:
+    	       LOGV("#### state3 ####\n");
+ 	       if (lock_flag) {
+    		   release_wake_lock("charger");
+    		   lock_flag = 0;
+    	       }
+    	   break;
+
+        default:
+            break;
+            }
+        }
+
+        /* do screen update last in case any of the above want to start
+         * screen transitions (animations, etc)
+         */
+        update_screen_state(charger, now);
+        wait_next_event(charger, now);
+    }
+#else
 static void event_loop(struct charger *charger)
 {
     int ret;
@@ -948,6 +1361,176 @@ static void event_loop(struct charger *charger)
     }
 }
 
+static int alarm_open_alm_dev()
+{
+	int fd;
+
+	fd = open("/dev/alarm", O_RDWR);
+	if(fd < 0 )
+		LOGE("Can't open alarm devfs node\n");
+
+	return fd;
+}
+
+static void alarm_close_alm_dev(int fd)
+{
+	close(fd);
+}
+
+static int alarm_open_rtc_dev()
+{
+	int fd;
+
+	fd = open("/dev/rtc0", O_RDWR);
+	if (fd < 0 )
+		LOGE("Can't open rtc devfs node\n");
+
+	return fd;
+}
+
+static void alarm_close_rtc_dev(int fd)
+{
+	close(fd);
+}
+
+static int alarm_set_reboot_time(int fd, int type, time_t secs)
+{
+	struct timespec ts;
+	ts.tv_sec = secs;
+	ts.tv_nsec = 0;
+	int ret;
+
+	ret = ioctl(fd, ANDROID_ALARM_SET(type), &ts);
+	if (ret < 0)
+		LOGE("Unable to set reboot time to %d\n", secs);
+	return ret;
+}
+
+static int alarm_get_alm_time(int fd, time_t *secs)
+{
+	struct tm alm_tm;
+	int ret;
+
+	ret = ioctl(fd, RTC_ALM_READ, &alm_tm);
+	if (ret < 0) {
+		LOGE("Unable to get alarm time\n");
+		goto err;
+	}
+
+	*secs = mktime(&alm_tm) + alm_tm.tm_gmtoff;
+	if (*secs < 0) {
+		LOGE("Invalid alarm seconds = %ld\n", *secs);
+		goto err;
+	}
+
+	return 0;
+
+err:
+	return -1;
+}
+
+static int alarm_get_rtc_time(int fd, time_t *secs)
+{
+	struct tm rtc_tm;
+	int ret;
+
+	ret = ioctl(fd, RTC_RD_TIME, &rtc_tm);
+	if (ret < 0) {
+		LOGE("Unable to get rtc time\n");
+		goto err;
+	}
+
+	*secs = mktime(&rtc_tm) + rtc_tm.tm_gmtoff;
+	if (*secs < 0) {
+		LOGE("Invalid rtc seconds = %ld\n", *secs);
+		goto err;
+	}
+
+	return 0;
+
+err:
+	return -1;
+}
+
+static int alarm_wait(int fd)
+{
+	int ret = 0;
+
+	do {
+		ret = ioctl(fd, ANDROID_ALARM_WAIT);
+	} while (ret < 0 && errno == EINTR);
+
+	if (ret < 0) {
+		LOGE("Unable to wait on alarm\n");
+		return 0;
+	}
+
+	return ret;
+}
+
+static void alarm_reboot()
+{
+	android_reboot(ANDROID_RB_RESTART, 0, 0);
+}
+
+void *alarm_thread(void *p)
+{
+	int alm_fd, rtc_fd, ret;
+	time_t g_alm_secs, g_rtc_secs, s_rb_secs;
+
+	rtc_fd = alarm_open_rtc_dev();
+	if (rtc_fd < 0)
+		goto rtc_err;
+
+	ret = alarm_get_alm_time(rtc_fd, &g_alm_secs);
+	if (ret < 0 || !g_alm_secs)
+		goto rtc_err;
+
+	ret = alarm_get_rtc_time(rtc_fd, &g_rtc_secs);
+	if (ret < 0)
+		goto rtc_err;
+
+	s_rb_secs = g_alm_secs - g_rtc_secs;
+	if (s_rb_secs <= 0)
+		goto rtc_err;
+
+	alm_fd = alarm_open_alm_dev();
+	if (alm_fd < 0)
+		goto rtc_err;
+
+	ret = alarm_set_reboot_time(alm_fd,
+					ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
+					s_rb_secs);
+	if (ret < 0)
+		goto alm_err;
+
+	ret = alarm_wait(alm_fd);
+	if (ret) {
+		LOGI("Exit from power off charging, reboot the phone!\n");
+		alarm_reboot();
+	}
+
+alm_err:
+	alarm_close_alm_dev(alm_fd);
+
+rtc_err:
+	alarm_close_rtc_dev(rtc_fd);
+
+	LOGE("Exit from alarm thread\n");
+	return NULL;
+}
+
+void alarm_thread_create()
+{
+	pthread_t tid;
+	int ret;
+
+	ret = pthread_create(&tid, NULL, alarm_thread, NULL);
+	if (ret < 0)
+		LOGE("Create alarm thread failed\n");
+#endif
+}
+
 int main(int argc, char **argv)
 {
     int ret;
@@ -962,6 +1545,10 @@ int main(int argc, char **argv)
     klog_set_level(CHARGER_KLOG_LEVEL);
 
     dump_last_kmsg();
+
+#ifndef ACT_HARDWARE
+	alarm_thread_create();
+#endif
 
     LOGI("--------------- STARTING CHARGER MODE ---------------\n");
 
@@ -1001,6 +1588,7 @@ int main(int argc, char **argv)
 
 #ifndef CHARGER_DISABLE_INIT_BLANK
     gr_fb_blank(true);
+    set_backlight(false);
 #endif
 
     charger->next_screen_transition = now - 1;
