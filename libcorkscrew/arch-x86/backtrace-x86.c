@@ -18,14 +18,15 @@
  * Backtracing functions for x86.
  */
 
-#ifndef __BIONIC__
-// glibc has its own renaming of the Linux kernel's structures.
-#define _GNU_SOURCE // For REG_EBP, REG_ESP, and REG_EIP.
-#include <ucontext.h>
-#endif
-
 #define LOG_TAG "Corkscrew"
 //#define LOG_NDEBUG 0
+
+#if !defined(__BIONIC__)
+// This has to be done early on because one of the system
+// includes might implicitly include <ucontext.h>
+#define __USE_GNU // For REG_EBP, REG_ESP, and REG_EIP.
+#define _GNU_SOURCE 1 // Sets __USE_GNU if features.h is included
+#endif
 
 #include "../backtrace-arch.h"
 #include "../backtrace-helper.h"
@@ -89,7 +90,6 @@ typedef struct ucontext {
 #else
 
 // glibc has its own renaming of the Linux kernel's structures.
-#define _GNU_SOURCE // For REG_EBP, REG_ESP, and REG_EIP.
 #include <ucontext.h>
 
 #endif
