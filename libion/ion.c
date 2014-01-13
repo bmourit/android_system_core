@@ -28,11 +28,8 @@
 #include <sys/types.h>
 
 #include <linux/ion.h>
-#include <ion/ion.h>
-
-#ifdef ACT_HARDWARE
 #include <linux/asoc_ion.h>
-#endif
+#include <ion/ion.h>
 
 int ion_open()
 {
@@ -159,7 +156,6 @@ int ion_sync_fd(int fd, int handle_fd)
     return ion_ioctl(fd, ION_IOC_SYNC, &data);
 }
 
-#ifdef ACT_HARDWARE
 int ion_phys(int fd, struct ion_handle *handle, unsigned long *phys)
 {
 	int ret; 
@@ -196,4 +192,3 @@ int ion_cache(int fd, struct ion_handle *handle, int cmd, void *vaddr, unsigned 
                 return ret;
         return ret;
 }
-#endif

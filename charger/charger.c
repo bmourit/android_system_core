@@ -65,10 +65,10 @@
 #define NSEC_PER_MSEC           (1000000LL)
 
 #define BATTERY_UNKNOWN_TIME    (2 * MSEC_PER_SEC)
-#define POWER_ON_KEY_TIME       (2 * MSEC_PER_SEC)
+#define POWER_ON_KEY_TIME       (1 * MSEC_PER_SEC)
 
 
-#define UNPLUGGED_SHUTDOWN_TIME (10 * MSEC_PER_SEC)
+#define UNPLUGGED_SHUTDOWN_TIME (1 * MSEC_PER_SEC)
 #ifdef ACT_HARDWARE
 #define DISCHARGE_TIME          (15 * MSEC_PER_SEC)
 #endif
@@ -215,10 +215,12 @@ enum STATE {
     PREPARE_SUSPEND,
     WAIT_SUSPEND,
 };
+
 enum ONOFF_MODE {
 	ON,
 	MEM,
 };
+
 int state= PREPARE_DISPLAY;
 int onoff_mode;
 bool bat_full = false;
@@ -446,7 +448,9 @@ static int request_suspend(bool enable)
     else
         return autosuspend_disable();
 }
-#else
+#endif
+
+#ifndef ACT_HARDWARE
 static int request_suspend(bool enable)
 {
     return 0;
@@ -801,7 +805,8 @@ static void redraw_screen(struct charger *charger)
 }
 
 #ifdef ACT_HARDWARE
-static bool power_supply_enough(struct charger *charger) {
+static bool power_supply_enough(struct charger *charger)
+{
     bool is_power_enough = true;
     int vol = 0;
     if (charger->wall_supply->online) {
@@ -836,7 +841,7 @@ static void update_screen_state(struct charger *charger, int64_t now)
     struct animation *batt_anim = charger->batt_anim;
     int cur_frame;
     int disp_time;
-
+    LOGV("batt_anim->run:%d, now < charger->next_screen_transition:%d, batt_anim->cur_cycle:%d, batt_anim->cur_frame:%d, batt_anim->num_cycles:%d\n", batt_anim->run, now < charger->next_screen_transition, batt_anim->cur_cycle,batt_anim->cur_frame,  batt_anim->num_cycles );
     if (!batt_anim->run || now < charger->next_screen_transition)
         return;
 
@@ -846,8 +851,10 @@ static void update_screen_state(struct charger *charger, int64_t now)
         charger->next_screen_transition = -1;
         gr_fb_blank(true);
         LOGV("[%lld] animation done\n", now);
+#ifndef ACT_HARDWARE
         if (charger->num_supplies_online > 0)
             request_suspend(true);
+#endif
         return;
     }
 
@@ -1014,8 +1021,14 @@ static void process_key(struct charger *charger, int code, int64_t now)
             }
         } else {
             /* if the power key got released, force screen state cycle */
+            LOGV("power key is release\n");
             if (key->pending) {
+#ifdef ACT_HARDWARE
+            	reset_animation(charger->batt_anim);
+            	charger->next_screen_transition = -1;
+#else
                 request_suspend(false);
+#endif
                 kick_animation(charger->batt_anim);
             }
         }
@@ -1035,7 +1048,9 @@ static void handle_input_state(struct charger *charger, int64_t now)
 static void handle_power_supply_state(struct charger *charger, int64_t now)
 {
     if (charger->num_supplies_online == 0) {
+#ifndef ACT_HARDWARE
         request_suspend(false);
+#endif
         if (charger->next_pwr_check == -1) {
             charger->next_pwr_check = now + UNPLUGGED_SHUTDOWN_TIME;
             LOGI("[%lld] device unplugged: shutting down in %lld (@ %lld)\n",
@@ -1078,7 +1093,7 @@ static void wait_next_event(struct charger *charger, int64_t now)
         timeout = max(0, next_event - now);
     else
 #ifdef ACT_HARDWARE
-        timeout = 3*MSEC_PER_SEC;
+        timeout = 3 * MSEC_PER_SEC;
 #else
         timeout = -1;
     LOGV("[%lld] blocking (%lld)\n", now, timeout);
@@ -1102,7 +1117,8 @@ static int input_callback(int fd, short revents, void *data)
 }
 
 #ifdef ACT_HARDWARE
-static void check_battery_full(struct charger *charger) {
+static void check_battery_full(struct charger *charger)
+{
     char status[64] = {0};
     if(!charger->battery || !charger->battery->online) {
         LOGI("battery not online");
@@ -1137,7 +1153,8 @@ static void check_battery_full(struct charger *charger) {
     }
 }
 
-static void event_loop(struct charger *charger) {
+static void event_loop(struct charger *charger)
+{
     int ret;
     int fd;
     while (true) {
@@ -1171,7 +1188,7 @@ static void event_loop(struct charger *charger) {
 	       if (charger->batt_anim->run ==  false) {
 	           state = PREPARE_SUSPEND;
 	       }
-    	   break;
+    	       break;
 
     	   case PREPARE_SUSPEND:
     	       LOGV("#### state2 ####\n");
@@ -1192,12 +1209,12 @@ static void event_loop(struct charger *charger) {
     		   release_wake_lock("charger");
     		   lock_flag = 0;
     	       }
-    	   break;
+    	       break;
 
-        default:
-            break;
-            }
-      }
+           default:
+               break;
+        }
+    }
 
         /* do screen update last in case any of the above want to start
          * screen transitions (animations, etc)

@@ -12,4 +12,4 @@ LOCAL_SRC_FILES := ion.c ion_test.c
 LOCAL_MODULE := iontest
 LOCAL_MODULE_TAGS := optional tests
 LOCAL_SHARED_LIBRARIES := liblog
-include $(BUILD_EXECUTABLE)
+#include $(BUILD_EXECUTABLE)

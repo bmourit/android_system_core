@@ -165,23 +165,6 @@ typedef enum {
     AUDIO_FORMAT_HE_AAC_V1           = 0x05000000UL,
     AUDIO_FORMAT_HE_AAC_V2           = 0x06000000UL,
     AUDIO_FORMAT_VORBIS              = 0x07000000UL,
-#ifdef QCOM_HARDWARE
-    AUDIO_FORMAT_EVRC                = 0x08000000UL,
-    AUDIO_FORMAT_QCELP               = 0x09000000UL,
-    AUDIO_FORMAT_AC3                 = 0x0a000000UL,
-    AUDIO_FORMAT_AC3_PLUS            = 0x0b000000UL,
-    AUDIO_FORMAT_DTS                 = 0x0c000000UL,
-    AUDIO_FORMAT_WMA                 = 0x0d000000UL,
-    AUDIO_FORMAT_WMA_PRO             = 0x0e000000UL,
-    AUDIO_FORMAT_AAC_ADIF            = 0x0f000000UL,
-    AUDIO_FORMAT_EVRCB               = 0x10000000UL,
-    AUDIO_FORMAT_EVRCWB              = 0x11000000UL,
-    AUDIO_FORMAT_EAC3                = 0x12000000UL,
-    AUDIO_FORMAT_DTS_LBR             = 0x13000000UL,
-    AUDIO_FORMAT_AMR_WB_PLUS         = 0x14000000UL,
-    AUDIO_FORMAT_MP2                 = 0x15000000UL,
-    AUDIO_FORMAT_EVRCNW              = 0x16000000UL,
-#endif
     AUDIO_FORMAT_MAIN_MASK           = 0xFF000000UL,
     AUDIO_FORMAT_SUB_MASK            = 0x00FFFFFFUL,
 
@@ -684,22 +667,6 @@ static inline bool audio_is_valid_format(audio_format_t format)
     case AUDIO_FORMAT_HE_AAC_V1:
     case AUDIO_FORMAT_HE_AAC_V2:
     case AUDIO_FORMAT_VORBIS:
-#ifdef QCOM_HARDWARE
-    case AUDIO_FORMAT_QCELP:
-    case AUDIO_FORMAT_EVRC:
-    case AUDIO_FORMAT_EVRCB:
-    case AUDIO_FORMAT_EVRCWB:
-    case AUDIO_FORMAT_AC3:
-    case AUDIO_FORMAT_EAC3:
-    case AUDIO_FORMAT_AAC_ADIF:
-    case AUDIO_FORMAT_WMA:
-    case AUDIO_FORMAT_WMA_PRO:
-    case AUDIO_FORMAT_DTS:
-    case AUDIO_FORMAT_DTS_LBR:
-    case AUDIO_FORMAT_AMR_WB_PLUS:
-    case AUDIO_FORMAT_MP2:
-    case AUDIO_FORMAT_EVRCNW:
-#endif
         return true;
     default:
         return false;

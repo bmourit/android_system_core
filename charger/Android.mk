@@ -22,19 +22,13 @@ LOCAL_FORCE_STATIC_EXECUTABLE := true
 LOCAL_MODULE_PATH := $(TARGET_ROOT_OUT)
 LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_UNSTRIPPED)
 
-LOCAL_C_INCLUDES := bootable/recovery
+LOCAL_C_INCLUDES := bootable/recovery hardware/libhardware_legacy/include/
 
-LOCAL_STATIC_LIBRARIES := libminui libpixelflinger_static libpng
+LOCAL_STATIC_LIBRARIES := libminui libpixelflinger_static libpng libpower
 ifeq ($(strip $(BOARD_CHARGER_ENABLE_SUSPEND)),true)
 LOCAL_STATIC_LIBRARIES += libsuspend
 endif
 LOCAL_STATIC_LIBRARIES += libz libstdc++ libcutils liblog libm libc
-
-ifeq ($(strip $(TARGET_BOARD_PLATFORM)),ATM702X)
-LOCAL_C_INCLUDES += hardware/libhardware_legacy/include
-LOCAL_STATIC_LIBRARIES += libpower
-LOCAL_CFLAGS += -DCHARGER_DISABLE_INIT_BLANK
-endif
 
 include $(BUILD_EXECUTABLE)
 
